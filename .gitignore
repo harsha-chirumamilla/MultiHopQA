@@ -1,0 +1,71 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Python tooling
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.pyre/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# Editor state
+.vscode*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+.history/
+
+# Local project resources
+Papers/
+Documents/
+kernel-metadata.json
+
+# Downloaded or generated data
+data/raw/*
+!data/raw/hotpotqa/
+data/raw/hotpotqa/*
+!data/raw/hotpotqa/.gitkeep
+
+data/processed/*
+!data/processed/hotpotqa/
+data/processed/hotpotqa/*
+!data/processed/hotpotqa/.gitkeep
+
+data/cache/*
+!data/cache/sentence_features/
+data/cache/sentence_features/*
+!data/cache/sentence_features/.gitkeep
+
+# Model outputs
+outputs/*
+!outputs/checkpoints/
+outputs/checkpoints/*
+!outputs/checkpoints/.gitkeep
+
+# Experiment runs
+experiments/runs/*
+!experiments/runs/.gitkeep

@@ -1,0 +1,7 @@
+dataset_id: hotpotqa/hotpot_qa
+dataset_config: distractor
+splits:
+  - train
+  - validation
+cache_dir: data/raw/hotpotqa/huggingface_cache
+output_dir: data/processed/hotpotqa
