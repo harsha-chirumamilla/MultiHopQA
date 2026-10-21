@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from evaluation.answer_metrics import answer_scores
+from multihopqa.evaluation.answer_metrics import answer_scores
 from multihopqa.evaluation.joint_metrics import joint_scores
 from multihopqa.evaluation.support_metrics import support_scores
 from multihopqa.training.losses import calculate_qa_loss
@@ -38,14 +38,30 @@ def get_model_inputs(batch):
     return {key: batch[key] for key in MODEL_INPUTS}
 
 
-def train_one_epoch(model, data_loader, optimizer, device, config, epoch_number):
+def train_one_epoch(
+    model,
+    data_loader,
+    optimizer,
+    device,
+    config,
+    epoch_number,
+    xla_model=None,
+    train_sampler=None,
+    is_master=True,
+):
     """Run one full pass through the training examples."""
     model.train()
+    if train_sampler is not None:
+        train_sampler.set_epoch(epoch_number - 1)
     totals = {"total": 0.0, "answer_type": 0.0, "support": 0.0, "span": 0.0}
     batches_seen = 0
     missing_span_labels = 0
 
-    progress = tqdm(data_loader, desc=f"Train epoch {epoch_number}")
+    progress = tqdm(
+        data_loader,
+        desc=f"Train epoch {epoch_number}",
+        disable=not is_master,
+    )
     for batch in progress:
         batch = move_batch_to_device(batch, device)
         outputs = model(**get_model_inputs(batch))
@@ -59,7 +75,10 @@ def train_one_epoch(model, data_loader, optimizer, device, config, epoch_number)
         optimizer.zero_grad()
         losses["total"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        if xla_model is None:
+            optimizer.step()
+        else:
+            xla_model.optimizer_step(optimizer)
 
         for name in totals:
             totals[name] += losses[name].item()
@@ -71,12 +90,13 @@ def train_one_epoch(model, data_loader, optimizer, device, config, epoch_number)
             ).sum().item()
         )
 
-        progress.set_postfix(
-            loss=f"{losses['total'].item():.3f}",
-            answer=f"{losses['answer_type'].item():.3f}",
-            support=f"{losses['support'].item():.3f}",
-            span=f"{losses['span'].item():.3f}",
-        )
+        if is_master:
+            progress.set_postfix(
+                loss=f"{losses['total'].item():.3f}",
+                answer=f"{losses['answer_type'].item():.3f}",
+                support=f"{losses['support'].item():.3f}",
+                span=f"{losses['span'].item():.3f}",
+            )
 
     if batches_seen == 0:
         raise ValueError("The training split is empty.")
@@ -141,6 +161,14 @@ def evaluate_model(model, data_loader, device, tokenizer, config):
         for batch in tqdm(data_loader, desc="Validate"):
             batch = move_batch_to_device(batch, device)
             outputs = model(**get_model_inputs(batch))
+            if device.type == "xla":
+                # Decode and score on CPU, copying once per batch instead of
+                # synchronizing the TPU for every scalar in the prediction loop.
+                outputs = {name: value.cpu() for name, value in outputs.items()}
+                batch = {
+                    name: value.cpu() if isinstance(value, torch.Tensor) else value
+                    for name, value in batch.items()
+                }
             answer_types = outputs["answer_type_logits"].argmax(dim=-1)
             node_counts = batch["node_mask"].sum(dim=1)
 
@@ -231,12 +259,24 @@ def save_predictions(file_path, predictions):
             output_file.write(json.dumps(prediction, ensure_ascii=False) + "\n")
 
 
-def train_model(model, train_loader, validation_loader, device, tokenizer, config):
-    """Train, validate, and save the best checkpoint."""
+def train_model(
+    model,
+    train_loader,
+    validation_loader,
+    device,
+    tokenizer,
+    config,
+    xla_model=None,
+    rank=0,
+    train_sampler=None,
+):
+    """Train, validate, and save the best checkpoint on one or many devices."""
+    is_master = rank == 0
     checkpoint_dir = Path(config["checkpoint_dir"])
     run_dir = Path(config["run_dir"])
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if is_master:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
 
     optimizer = torch.optim.AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
@@ -260,57 +300,113 @@ def train_model(model, train_loader, validation_loader, device, tokenizer, confi
             device,
             config,
             epoch_number,
+            xla_model=xla_model,
+            train_sampler=train_sampler,
+            is_master=is_master,
         )
-        validation_metrics, predictions = evaluate_model(
-            model,
-            validation_loader,
-            device,
-            tokenizer,
-            config,
-        )
-
-        epoch_record = {
-            "epoch": epoch_number,
-            "train": train_metrics,
-            "validation": validation_metrics,
-        }
-        history.append(epoch_record)
-        save_json(run_dir / "training_history.json", history)
-
-        print(
-            f"Epoch {epoch_number}: "
-            f"validation answer F1={validation_metrics['answer_f1']:.4f}, "
-            f"support F1={validation_metrics['support_f1']:.4f}, "
-            f"joint F1={validation_metrics['joint_f1']:.4f}"
-        )
-        print(
-            f"Span labels not found in context: "
-            f"train={train_metrics['span_alignment_misses']}, "
-            f"validation={validation_metrics['span_alignment_misses']}"
-        )
-
-        if validation_metrics["joint_f1"] > best_joint_f1:
-            best_joint_f1 = validation_metrics["joint_f1"]
-            epochs_without_improvement = 0
-            save_predictions(run_dir / "validation_predictions.jsonl", predictions)
-            torch.save(
-                {
-                    "model_state": checkpoint_model.state_dict(),
-                    "model_name": config["model_name"],
-                    "graph_hidden_size": config["graph_hidden_size"],
-                    "attention_heads": config["attention_heads"],
-                    "model_config": dict(config),
-                    "epoch": epoch_number,
-                    "validation_metrics": validation_metrics,
-                },
-                checkpoint_dir / "best_basic_gat.pt",
+        if xla_model is not None:
+            train_metrics = xla_model.mesh_reduce(
+                f"train-metrics-{epoch_number}",
+                train_metrics,
+                _mean_train_metrics,
             )
-            print(f"Saved best checkpoint to {checkpoint_dir / 'best_basic_gat.pt'}")
-        else:
-            epochs_without_improvement += 1
 
-        if epochs_without_improvement >= config["early_stopping_patience"]:
-            print("Stopping because validation joint F1 did not improve.")
+        control = None
+        if is_master:
+            if validation_loader is None:
+                raise ValueError("The master worker needs a validation data loader.")
+            validation_metrics, predictions = evaluate_model(
+                model,
+                validation_loader,
+                device,
+                tokenizer,
+                config,
+            )
+
+            epoch_record = {
+                "epoch": epoch_number,
+                "graph_mode": config.get("graph_mode", "current"),
+                "train": train_metrics,
+                "validation": validation_metrics,
+            }
+            history.append(epoch_record)
+            save_json(run_dir / "training_history.json", history)
+
+            print(
+                f"Epoch {epoch_number}: "
+                f"validation answer F1={validation_metrics['answer_f1']:.4f}, "
+                f"support F1={validation_metrics['support_f1']:.4f}, "
+                f"joint F1={validation_metrics['joint_f1']:.4f}"
+            )
+            print(
+                f"Span labels not found in context: "
+                f"train={train_metrics['span_alignment_misses']}, "
+                f"validation={validation_metrics['span_alignment_misses']}"
+            )
+
+            if validation_metrics["joint_f1"] > best_joint_f1:
+                best_joint_f1 = validation_metrics["joint_f1"]
+                epochs_without_improvement = 0
+                save_predictions(run_dir / "validation_predictions.jsonl", predictions)
+                model_state = {
+                    name: value.detach().cpu()
+                    for name, value in checkpoint_model.state_dict().items()
+                }
+                torch.save(
+                    {
+                        "model_state": model_state,
+                        "model_name": config["model_name"],
+                        "graph_hidden_size": config["graph_hidden_size"],
+                        "attention_heads": config["attention_heads"],
+                        "model_config": dict(config),
+                        "epoch": epoch_number,
+                        "validation_metrics": validation_metrics,
+                    },
+                    checkpoint_dir / "best_basic_gat.pt",
+                )
+                print(
+                    f"Saved best checkpoint to "
+                    f"{checkpoint_dir / 'best_basic_gat.pt'}"
+                )
+            else:
+                epochs_without_improvement += 1
+
+            should_stop = (
+                epochs_without_improvement >= config["early_stopping_patience"]
+            )
+            if should_stop:
+                print("Stopping because validation joint F1 did not improve.")
+            control = {
+                "best_joint_f1": best_joint_f1,
+                "epochs_without_improvement": epochs_without_improvement,
+                "should_stop": should_stop,
+            }
+
+        if xla_model is not None:
+            control = xla_model.mesh_reduce(
+                f"epoch-control-{epoch_number}",
+                control,
+                lambda per_rank_values: per_rank_values[0],
+            )
+            best_joint_f1 = control["best_joint_f1"]
+            epochs_without_improvement = control["epochs_without_improvement"]
+            if control["should_stop"]:
+                break
+        elif control["should_stop"]:
             break
 
     return history
+
+
+def _mean_train_metrics(per_rank_metrics):
+    """Average losses over replicas and sum the count-valued diagnostic."""
+    metric_names = ("total", "answer_type", "support", "span")
+    aggregated = {
+        name: sum(metrics[name] for metrics in per_rank_metrics)
+        / len(per_rank_metrics)
+        for name in metric_names
+    }
+    aggregated["span_alignment_misses"] = sum(
+        metrics["span_alignment_misses"] for metrics in per_rank_metrics
+    )
+    return aggregated

@@ -1,6 +1,5 @@
 """Losses for answer type, extractive spans, and sentence support labels."""
 
-import torch
 from torch.nn import functional as F
 
 
@@ -20,45 +19,26 @@ def calculate_qa_loss(outputs, batch, support_loss_weight, span_loss_weight):
     positive_nodes = valid_nodes & (batch["support_labels"] > 0.5)
     negative_nodes = valid_nodes & ~positive_nodes
 
-    if positive_nodes.any():
-        positive_loss = node_loss[positive_nodes].mean()
-    else:
-        positive_loss = node_loss.sum() * 0.0
-
-    if negative_nodes.any():
-        negative_loss = node_loss[negative_nodes].mean()
-    else:
-        negative_loss = node_loss.sum() * 0.0
+    positive_loss = (node_loss * positive_nodes).sum() / positive_nodes.sum().clamp(
+        min=1
+    )
+    negative_loss = (node_loss * negative_nodes).sum() / negative_nodes.sum().clamp(
+        min=1
+    )
 
     support_loss = (positive_loss + negative_loss) / 2.0
 
-    span_losses = []
-    batch_size, _, sequence_length = outputs["start_logits"].shape
-    for graph_index in range(batch_size):
-        if not batch["span_available"][graph_index]:
-            continue
-
-        node_count = int(batch["node_mask"][graph_index].sum().item())
-        start_scores = outputs["start_logits"][graph_index, :node_count].reshape(-1)
-        end_scores = outputs["end_logits"][graph_index, :node_count].reshape(-1)
-
-        start_target = (
-            batch["span_node"][graph_index] * sequence_length
-            + batch["span_start"][graph_index]
-        )
-        end_target = (
-            batch["span_node"][graph_index] * sequence_length
-            + batch["span_end"][graph_index]
-        )
-
-        start_loss = F.cross_entropy(start_scores.unsqueeze(0), start_target.unsqueeze(0))
-        end_loss = F.cross_entropy(end_scores.unsqueeze(0), end_target.unsqueeze(0))
-        span_losses.append((start_loss + end_loss) / 2.0)
-
-    if span_losses:
-        span_loss = torch.stack(span_losses).mean()
-    else:
-        span_loss = outputs["start_logits"].sum() * 0.0
+    _, _, sequence_length = outputs["start_logits"].shape
+    start_scores = outputs["start_logits"].flatten(start_dim=1)
+    end_scores = outputs["end_logits"].flatten(start_dim=1)
+    start_targets = batch["span_node"] * sequence_length + batch["span_start"]
+    end_targets = batch["span_node"] * sequence_length + batch["span_end"]
+    start_losses = F.cross_entropy(start_scores, start_targets, reduction="none")
+    end_losses = F.cross_entropy(end_scores, end_targets, reduction="none")
+    available_spans = batch["span_available"].to(outputs["start_logits"].dtype)
+    span_loss = (
+        ((start_losses + end_losses) / 2.0) * available_spans
+    ).sum() / available_spans.sum().clamp(min=1.0)
 
     total_loss = (
         answer_type_loss
@@ -71,5 +51,4 @@ def calculate_qa_loss(outputs, batch, support_loss_weight, span_loss_weight):
         "answer_type": answer_type_loss,
         "support": support_loss,
         "span": span_loss,
-        "span_count": len(span_losses),
     }

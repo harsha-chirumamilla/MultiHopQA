@@ -2,7 +2,7 @@
 
 import torch
 from torch import nn
-from torch.nn import functional as F
+from torch.nn import functional as f
 
 
 class GraphAttentionLayer(nn.Module):
@@ -33,7 +33,7 @@ class GraphAttentionLayer(nn.Module):
 
     def forward(self, node_features, adjacency, node_mask):
         batch_size, node_count, _ = node_features.shape
-        node_features = F.dropout(
+        node_features = f.dropout(
             node_features,
             p=self.dropout,
             training=self.training,
@@ -55,11 +55,11 @@ class GraphAttentionLayer(nn.Module):
         ).sum(dim=-1)
 
         scores = source_scores.unsqueeze(2) + target_scores.unsqueeze(1)
-        scores = F.leaky_relu(scores, negative_slope=0.2)
+        scores = f.leaky_relu(scores, negative_slope=0.2)
         scores = scores.masked_fill(~adjacency.unsqueeze(-1), -10000.0)
 
         attention = torch.softmax(scores, dim=2)
-        attention = F.dropout(
+        attention = f.dropout(
             attention,
             p=self.dropout,
             training=self.training,
@@ -72,6 +72,6 @@ class GraphAttentionLayer(nn.Module):
             head_outputs.append(torch.bmm(head_attention, head_features))
 
         updated_nodes = torch.cat(head_outputs, dim=-1)
-        updated_nodes = F.elu(updated_nodes)
+        updated_nodes = f.elu(updated_nodes)
         updated_nodes = updated_nodes * node_mask.unsqueeze(-1)
         return updated_nodes

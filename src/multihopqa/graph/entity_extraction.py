@@ -10,7 +10,7 @@ CAPITALIZED_PHRASE = re.compile(
 )
 ALL_CAPS_WORD = re.compile(r"\b[A-Z]{2,}\b")
 
-COMMON_SENTENCE_STARTS = {
+LEGACY_COMMON_SENTENCE_STARTS = {
     "a",
     "an",
     "and",
@@ -36,9 +36,42 @@ COMMON_SENTENCE_STARTS = {
     "where",
 }
 
+COMMON_SENTENCE_STARTS = LEGACY_COMMON_SENTENCE_STARTS | {
+    "according",
+    "after",
+    "although",
+    "before",
+    "during",
+    "eventually",
+    "finally",
+    "first",
+    "following",
+    "furthermore",
+    "however",
+    "later",
+    "meanwhile",
+    "nevertheless",
+    "next",
+    "previously",
+    "second",
+    "subsequently",
+    "then",
+    "therefore",
+    "third",
+    "thus",
+    "while",
+}
 
-def extract_entities(text):
+
+def extract_entities(
+    text,
+    sentence_start_stopwords=None,
+    filter_acronym_openers=True,
+):
     """Find capitalized names and acronyms, then normalize and de-duplicate them."""
+    if sentence_start_stopwords is None:
+        sentence_start_stopwords = COMMON_SENTENCE_STARTS
+
     found = set()
 
     for match in CAPITALIZED_PHRASE.finditer(text):
@@ -47,7 +80,11 @@ def extract_entities(text):
 
         at_sentence_start = not text[: match.start()].strip()
         is_one_word_opener = len(phrase.split()) == 1
-        if at_sentence_start and is_one_word_opener and first_word in COMMON_SENTENCE_STARTS:
+        if (
+            at_sentence_start
+            and is_one_word_opener
+            and first_word in sentence_start_stopwords
+        ):
             continue
 
         normalized = normalize_entity(phrase)
@@ -56,6 +93,13 @@ def extract_entities(text):
 
     for match in ALL_CAPS_WORD.finditer(text):
         normalized = normalize_entity(match.group(0))
+        at_sentence_start = not text[: match.start()].strip()
+        if (
+            filter_acronym_openers
+            and at_sentence_start
+            and normalized in sentence_start_stopwords
+        ):
+            continue
         if normalized:
             found.add(normalized)
 

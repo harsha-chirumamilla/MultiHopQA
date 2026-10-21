@@ -1,9 +1,7 @@
 """Read prepared JSONL examples without keeping the whole file in memory."""
 
 import json
-
 from torch.utils.data import Dataset
-
 
 class HotpotJsonlDataset(Dataset):
     """A small random-access reader for the prepared HotpotQA JSONL files."""
@@ -21,9 +19,11 @@ class HotpotJsonlDataset(Dataset):
                 self.line_offsets.append(line_start)
 
     def __len__(self):
+        """Return the number of examples in the file."""
         return len(self.line_offsets)
 
     def __getitem__(self, index):
+        """Return one example as a Python dictionary, given its index in the file."""
         with open(self.file_path, "rb") as input_file:
             input_file.seek(self.line_offsets[index])
             line = input_file.readline().decode("utf-8")

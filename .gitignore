@@ -33,10 +33,8 @@ pip-wheel-metadata/
 
 # Editor state
 .vscode*
-!.vscode/settings.json
-!.vscode/extensions.json
-!.vscode/launch.json
-!.vscode/tasks.json
+.idea*
+.codex*
 .history/
 
 # Local project resources
@@ -69,3 +67,4 @@ outputs/checkpoints/*
 # Experiment runs
 experiments/runs/*
 !experiments/runs/.gitkeep
+.idea*

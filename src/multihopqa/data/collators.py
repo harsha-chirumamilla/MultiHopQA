@@ -40,9 +40,21 @@ def find_answer_tokens(answer, sentence, offsets, token_type_ids):
 class GraphQADataCollator:
     """Tokenize sentence nodes and pad their separate question graphs."""
 
-    def __init__(self, tokenizer, max_sequence_length):
+    def __init__(
+        self,
+        tokenizer,
+        max_sequence_length,
+        graph_mode="current",
+        static_shapes=False,
+        node_padding_multiple=8,
+    ):
         self.tokenizer = tokenizer
         self.max_sequence_length = max_sequence_length
+        self.graph_mode = graph_mode
+        self.static_shapes = static_shapes
+        self.node_padding_multiple = node_padding_multiple
+        if node_padding_multiple < 1:
+            raise ValueError("node_padding_multiple must be at least one.")
 
     def __call__(self, examples):
         questions = []
@@ -56,7 +68,7 @@ class GraphQADataCollator:
             if not nodes:
                 raise ValueError(f"Example {example['id']} has no sentence nodes.")
 
-            graph_adjacencies.append(build_adjacency(nodes))
+            graph_adjacencies.append(build_adjacency(nodes, self.graph_mode))
             node_counts.append(len(nodes))
 
             for node_index, node in enumerate(nodes):
@@ -69,13 +81,19 @@ class GraphQADataCollator:
             sentence_texts,
             max_length=self.max_sequence_length,
             truncation=True,
-            padding=True,
+            padding="max_length" if self.static_shapes else True,
             return_offsets_mapping=True,
             return_tensors="pt",
         )
 
         batch_size = len(examples)
         max_nodes = max(node_counts)
+        if self.static_shapes:
+            max_nodes = (
+                (max_nodes + self.node_padding_multiple - 1)
+                // self.node_padding_multiple
+                * self.node_padding_multiple
+            )
         sequence_length = encoded["input_ids"].shape[1]
         pad_id = self.tokenizer.pad_token_id
 

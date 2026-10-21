@@ -3,7 +3,7 @@ max_sequence_length: 128
 graph_hidden_size: 128
 attention_heads: 4
 dropout: 0.1
-batch_size: 8
+batch_size: 48
 epochs: 3
 learning_rate: 0.0002
 support_loss_weight: 1.0
@@ -11,5 +11,5 @@ span_loss_weight: 1.0
 max_answer_length: 30
 early_stopping_patience: 2
 seed: 42
-checkpoint_dir: outputs/checkpoints/basic_gat
-run_dir: experiments/runs/basic_gat
+checkpoint_dir: outputs/checkpoints/gat
+run_dir: experiments/runs/gat

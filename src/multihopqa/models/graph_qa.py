@@ -6,7 +6,7 @@ from torch import nn
 from multihopqa.models.gat_layer import GraphAttentionLayer
 
 
-class BasicGATForQuestionAnswering(nn.Module):
+class GATForQuestionAnswering(nn.Module):
     """Predict answer type, answer span, and supporting sentences."""
 
     def __init__(
@@ -52,8 +52,6 @@ class BasicGATForQuestionAnswering(nn.Module):
         adjacency,
     ):
         batch_size, node_count, sequence_length = input_ids.shape
-        flat_node_mask = node_mask.reshape(-1)
-
         flat_input_ids = input_ids.reshape(-1, sequence_length)
         flat_attention_mask = attention_mask.reshape(-1, sequence_length)
         flat_token_type_ids = token_type_ids.reshape(-1, sequence_length)
@@ -61,27 +59,44 @@ class BasicGATForQuestionAnswering(nn.Module):
         # The BERT encoder stays frozen in the first experiment.
         self.encoder.eval()
         with torch.no_grad():
-            encoded = self.encoder(
-                input_ids=flat_input_ids[flat_node_mask],
-                attention_mask=flat_attention_mask[flat_node_mask],
-                token_type_ids=flat_token_type_ids[flat_node_mask],
-            )
+            if input_ids.device.type == "xla":
+                # Boolean indexing makes the encoder's leading dimension depend
+                # on the number of real nodes in a batch. Encode the padded rows
+                # too on XLA so each graph-size bucket has a stable shape.
+                encoded = self.encoder(
+                    input_ids=flat_input_ids,
+                    attention_mask=flat_attention_mask,
+                    token_type_ids=flat_token_type_ids,
+                )
+                token_states = encoded.last_hidden_state.view(
+                    batch_size,
+                    node_count,
+                    sequence_length,
+                    self.encoder_size,
+                )
+            else:
+                flat_node_mask = node_mask.reshape(-1)
+                encoded = self.encoder(
+                    input_ids=flat_input_ids[flat_node_mask],
+                    attention_mask=flat_attention_mask[flat_node_mask],
+                    token_type_ids=flat_token_type_ids[flat_node_mask],
+                )
 
-        valid_token_states = encoded.last_hidden_state
-        token_states = valid_token_states.new_zeros(
-            (
-                batch_size * node_count,
-                sequence_length,
-                self.encoder_size,
-            )
-        )
-        token_states[flat_node_mask] = valid_token_states
-        token_states = token_states.view(
-            batch_size,
-            node_count,
-            sequence_length,
-            self.encoder_size,
-        )
+                valid_token_states = encoded.last_hidden_state
+                token_states = valid_token_states.new_zeros(
+                    (
+                        batch_size * node_count,
+                        sequence_length,
+                        self.encoder_size,
+                    )
+                )
+                token_states[flat_node_mask] = valid_token_states
+                token_states = token_states.view(
+                    batch_size,
+                    node_count,
+                    sequence_length,
+                    self.encoder_size,
+                )
 
         sentence_features = token_states[:, :, 0, :]
         graph_nodes = self.first_gat(sentence_features, adjacency, node_mask)
