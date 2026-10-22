@@ -51,16 +51,58 @@ Start training after preparing the dataset:
 python src/train.py
 ```
 
+This trains a two-layer graph attention network over sentence nodes. Its answer
+heads predict yes/no or an answer span, and its support head scores evidence
+sentences. Training uses all configured examples and saves the best joint
+answer/support checkpoint under `outputs/checkpoints/basic_gat/`. The default
+device setting selects an available TPU, GPU, or CPU; use `--device cpu`,
+`--device cuda`, or `--device xla` to choose explicitly. Training settings are
+in `configs/models/basic_gat_frozen.yaml`.
+
+The graph builder also supports a legacy clique graph. Train it with
+`python src/train.py --graph-mode legacy`; outputs are saved in separate
+`_legacy` directories. Compare graph structure and support-pair reachability
+with `python src/analyze_graphs.py --split validation`.
+
+### Transformer-only support baseline
+
+To compare graph message passing with global transformer attention, run the
+BERT-only support baseline:
+
+```bash
+python src/train_transformer_baseline.py
+```
+
+This model presents the question and candidate sentences as one BERT input, so
+self-attention can connect evidence across sentences and paragraphs. It predicts
+supporting facts directly and has no answer-span objective. It reports support
+EM, precision, recall, and F1, matching the GAT's evidence metrics. BERT's
+default input limit is 512 tokens; candidate sentences omitted by truncation are
+tracked in validation predictions. Settings are in
+`configs/models/transformer_support_baseline.yaml`; checkpoints and run outputs
+are saved separately under `outputs/checkpoints/transformer_support/` and
+`experiments/runs/transformer_support/`.
+
 ## Kaggle
 
 The push utility packages the source and configs as a Kaggle script kernel,
 enables internet access for Hugging Face downloads, and starts a run. TPU v5e-8
-is the default accelerator; use `--cpu` to request CPU execution. Kaggle API
-credentials must be configured for the Kaggle CLI.
+is the default accelerator; use `--gpu` to request a Kaggle NVIDIA T4 GPU, or
+`--cpu` for CPU execution. Kaggle API credentials must be configured for the
+Kaggle CLI.
 
 ```bash
 python -m pip install kaggle
 python scripts/push_to_kaggle.py --kernel-id YOUR_KAGGLE_USERNAME/MultihopQA
+```
+
+To push and run the BERT-only support baseline on the default TPU, add
+`--transformer-baseline`:
+
+```bash
+python scripts/push_to_kaggle.py \
+  --kernel-id YOUR_KAGGLE_USERNAME/MultihopQA \
+  --transformer-baseline
 ```
 
 The kernel prepares HotpotQA if the processed splits are missing. Training

@@ -38,7 +38,11 @@ def make_project_archive():
     return base64.b64encode(archive.getvalue()).decode("ascii")
 
 
-def make_kernel_runner(archive_b64, train_device="xla"):
+def make_kernel_runner(
+    archive_b64,
+    train_device="xla",
+    training_script="src/train.py",
+):
     encoded_lines = textwrap.wrap(archive_b64, width=100)
     archive_literal = "\n".join(f'    "{line}"' for line in encoded_lines)
     runner = '''\
@@ -53,6 +57,7 @@ def make_kernel_runner(archive_b64, train_device="xla"):
         import zipfile
 
         TRAIN_DEVICE = "__TRAIN_DEVICE__"
+        TRAINING_SCRIPT = "__TRAINING_SCRIPT__"
         PROJECT_ARCHIVE = (
             __ARCHIVE_LITERAL__
         )
@@ -119,7 +124,7 @@ def make_kernel_runner(archive_b64, train_device="xla"):
 
             print(f"Training project files are in {project_dir}")
             subprocess.run(
-                [sys.executable, "src/train.py", "--device", TRAIN_DEVICE],
+                [sys.executable, TRAINING_SCRIPT, "--device", TRAIN_DEVICE],
                 cwd=project_dir,
                 check=True,
             )
@@ -131,6 +136,7 @@ def make_kernel_runner(archive_b64, train_device="xla"):
     '''
     runner = textwrap.dedent(runner)
     runner = runner.replace("__ARCHIVE_LITERAL__", archive_literal)
+    runner = runner.replace("__TRAINING_SCRIPT__", training_script)
     return runner.replace("__TRAIN_DEVICE__", train_device)
 
 
@@ -139,7 +145,14 @@ def title_from_kernel_id(kernel_id):
     return " ".join(part.capitalize() for part in slug.replace("_", "-").split("-"))
 
 
-def write_kernel_bundle(directory, kernel_id, title, is_private, accelerator="tpu"):
+def write_kernel_bundle(
+    directory,
+    kernel_id,
+    title,
+    is_private,
+    accelerator="tpu",
+    training_script="src/train.py",
+):
     if accelerator not in {"gpu", "cpu", "tpu"}:
         raise ValueError(f"Unsupported Kaggle accelerator: {accelerator}")
     directory.mkdir(parents=True, exist_ok=True)
@@ -147,6 +160,7 @@ def write_kernel_bundle(directory, kernel_id, title, is_private, accelerator="tp
         make_kernel_runner(
             make_project_archive(),
             train_device="xla" if accelerator == "tpu" else "auto",
+            training_script=training_script,
         ),
         encoding="utf-8",
     )
@@ -160,7 +174,10 @@ def write_kernel_bundle(directory, kernel_id, title, is_private, accelerator="tp
         "enable_gpu": "true" if accelerator == "gpu" else "false",
         "enable_tpu": "true" if accelerator == "tpu" else "false",
         "enable_internet": "true",
-        "machine_shape": "TpuV5E8" if accelerator == "tpu" else "",
+        "machine_shape": {
+            "gpu": "NvidiaTeslaT4",
+            "tpu": "TpuV5E8",
+        }.get(accelerator, ""),
         "dataset_sources": [],
         "competition_sources": [],
         "kernel_sources": [],
@@ -174,8 +191,9 @@ def write_kernel_bundle(directory, kernel_id, title, is_private, accelerator="tp
 def build_push_command(staging_dir, accelerator):
     """Build the Kaggle CLI command for the selected accelerator."""
     command = ["kaggle", "kernels", "push", "-p", str(staging_dir)]
-    if accelerator == "tpu":
-        command.extend(["--accelerator", "TpuV5E8"])
+    accelerator_shapes = {"gpu": "NvidiaTeslaT4", "tpu": "TpuV5E8"}
+    if accelerator in accelerator_shapes:
+        command.extend(["--accelerator", accelerator_shapes[accelerator]])
     return command
 
 
@@ -199,7 +217,12 @@ def parse_args():
     accelerator_group.add_argument(
         "--cpu",
         action="store_true",
-        help="Request a CPU kernel instead of the default Kaggle TPU.",
+        help="Request a CPU kernel instead of an accelerator.",
+    )
+    accelerator_group.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Request a Kaggle NVIDIA T4 GPU kernel.",
     )
     accelerator_group.add_argument(
         "--tpu",
@@ -210,6 +233,11 @@ def parse_args():
         "--public",
         action="store_true",
         help="Make the Kaggle kernel public. Kernels are private by default.",
+    )
+    parser.add_argument(
+        "--transformer-baseline",
+        action="store_true",
+        help="Run the BERT-only support-fact baseline instead of the GAT model.",
     )
     parser.add_argument(
         "--staging-dir",
@@ -230,7 +258,12 @@ def parse_args():
 def main():
     arguments = parse_args()
     title = arguments.title or title_from_kernel_id(arguments.kernel_id)
-    accelerator = "cpu" if arguments.cpu else "tpu"
+    accelerator = "cpu" if arguments.cpu else "gpu" if arguments.gpu else "tpu"
+    training_script = (
+        "src/train_transformer_baseline.py"
+        if arguments.transformer_baseline
+        else "src/train.py"
+    )
 
     if arguments.staging_dir:
         staging_dir = arguments.staging_dir.resolve()
@@ -240,6 +273,7 @@ def main():
             title,
             is_private=not arguments.public,
             accelerator=accelerator,
+            training_script=training_script,
         )
         subprocess.run(build_push_command(staging_dir, accelerator), check=True)
     else:
@@ -251,6 +285,7 @@ def main():
                 title,
                 is_private=not arguments.public,
                 accelerator=accelerator,
+                training_script=training_script,
             )
             subprocess.run(build_push_command(staging_dir, accelerator), check=True)
 
