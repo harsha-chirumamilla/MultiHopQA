@@ -1,4 +1,4 @@
-"""Train the sentence-graph QA model on CPU, CUDA, or a Kaggle TPU."""
+"""Train a full-context BERT reader or its graph-enhanced counterpart."""
 
 import argparse
 import importlib.util
@@ -10,11 +10,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoModel, AutoTokenizer
 
-from multihopqa.data.collators import GraphQADataCollator
 from multihopqa.data.dataset import HotpotJsonlDataset
+from multihopqa.data.reader_collator import HotpotQAReaderCollator
 from multihopqa.graph.builder import GRAPH_MODES
-from multihopqa.models.graph_qa import GATForQuestionAnswering
-from multihopqa.training.trainer import train_model
+from multihopqa.models.reader_qa import HotpotQAReader
+from multihopqa.training.reader_trainer import train_reader
 from multihopqa.utils.config import check_data_config
 from multihopqa.utils.config import load_config
 from multihopqa.utils.seed import set_seed
@@ -51,17 +51,19 @@ def resolve_device(requested_device):
 
 
 def build_model_and_tokenizer(model_config, device, is_master=True):
-    """Load the tokenizer and frozen encoder, then place the QA model."""
+    """Load the tokenizer and fine-tuned encoder, then place the reader."""
     model_name = model_config["model_name"]
     if is_master:
-        print(f"Loading tokenizer and frozen text encoder: {model_name}")
+        print(f"Loading tokenizer and text encoder: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     encoder = AutoModel.from_pretrained(model_name)
-    model = GATForQuestionAnswering(
+    model = HotpotQAReader(
         encoder=encoder,
+        use_graph=model_config["use_graph"],
         graph_hidden_size=model_config["graph_hidden_size"],
         attention_heads=model_config["attention_heads"],
         dropout=model_config["dropout"],
+        answer_support_bias=model_config["answer_support_bias"],
     ).to(device)
     return model, tokenizer
 
@@ -73,7 +75,7 @@ def validate_prepared_data(data_config):
         "train" not in data_config["splits"]
         or "validation" not in data_config["splits"]
     ):
-        raise ValueError("Basic GAT training needs both train and validation splits.")
+        raise ValueError("Reader training needs both train and validation splits.")
 
     data_dir = Path(data_config["output_dir"])
     train_file = data_dir / "train.jsonl"
@@ -97,12 +99,14 @@ def build_data_loaders(
     include_validation=True,
     device_type="cpu",
 ):
-    """Build loaders, optionally with static XLA shapes and a distributed sampler."""
-    collator = GraphQADataCollator(
+    """Build full-context window loaders with sentence-level evidence labels."""
+    collator = HotpotQAReaderCollator(
         tokenizer,
-        model_config["max_sequence_length"],
+        max_sequence_length=model_config["max_sequence_length"],
+        stride=model_config["window_stride"],
         graph_mode=graph_mode,
         static_shapes=device_type == "xla",
+        static_node_count=model_config.get("static_node_count", 256),
     )
     train_dataset = HotpotJsonlDataset(train_file)
     train_loader = DataLoader(
@@ -176,7 +180,7 @@ def run_single_device(
         f"Using complete splits: {train_count:,} train and "
         f"{len(validation_dataset):,} validation examples."
     )
-    train_model(model, train_loader, validation_loader, device, tokenizer, model_config)
+    train_reader(model, train_loader, validation_loader, device, tokenizer, model_config)
 
 
 def xla_worker(index, arguments, model_config, train_file, validation_file):
@@ -196,13 +200,8 @@ def xla_worker(index, arguments, model_config, train_file, validation_file):
     rank = index
     world_size = xr.world_size()
     is_master = rank == 0
-    global_batch_size = model_config["batch_size"]
-    if global_batch_size % world_size:
-        raise ValueError(
-            f"Configured global batch_size ({global_batch_size}) must be divisible "
-            f"by the XLA worker count ({world_size})."
-        )
-    local_batch_size = global_batch_size // world_size
+    local_batch_size = model_config.get("per_device_batch_size", 1)
+    global_batch_size = local_batch_size * world_size
 
     set_seed(model_config["seed"])
     if is_master:
@@ -225,11 +224,13 @@ def xla_worker(index, arguments, model_config, train_file, validation_file):
         seed=model_config["seed"],
         drop_last=False,
     )
-    collator = GraphQADataCollator(
+    collator = HotpotQAReaderCollator(
         tokenizer,
-        model_config["max_sequence_length"],
+        max_sequence_length=model_config["max_sequence_length"],
+        stride=model_config["window_stride"],
         graph_mode=arguments.graph_mode,
         static_shapes=True,
+        static_node_count=model_config.get("static_node_count", 256),
     )
     cpu_train_loader = DataLoader(
         train_dataset,
@@ -257,7 +258,7 @@ def xla_worker(index, arguments, model_config, train_file, validation_file):
             f"{len(validation_dataset):,} validation examples."
         )
 
-    train_model(
+    train_reader(
         base_model,
         train_loader,
         validation_loader,
@@ -271,7 +272,7 @@ def xla_worker(index, arguments, model_config, train_file, validation_file):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train the Basic GAT QA model.")
+    parser = argparse.ArgumentParser(description="Train the HotpotQA reader.")
     parser.add_argument(
         "--data-config",
         default="configs/data/hotpotqa_distractor.yaml",
@@ -279,8 +280,8 @@ def parse_args():
     )
     parser.add_argument(
         "--model-config",
-        default="configs/models/basic_gat_frozen.yaml",
-        help="Basic GAT training config path, relative to the repository folder.",
+        default="configs/models/bert_reader.yaml",
+        help="Reader config path; choose bert_reader.yaml or gat_reader.yaml.",
     )
     parser.add_argument(
         "--graph-mode",
@@ -304,7 +305,10 @@ def main():
         load_config(arguments.model_config),
         arguments.graph_mode,
     )
-    print(f"Training with graph mode: {arguments.graph_mode}")
+    print(
+        f"Training {'GAT-enhanced reader' if model_config['use_graph'] else 'BERT reader baseline'} "
+        f"with graph mode: {arguments.graph_mode}"
+    )
     train_file, validation_file = validate_prepared_data(data_config)
     device_name = resolve_device(arguments.device)
 

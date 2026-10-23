@@ -39,49 +39,41 @@ python src/audit_hotpotqa.py
 
 ## Model and training
 
-The model uses a frozen BERT encoder to produce token features and a two-layer
-graph attention network to pass information between sentence nodes. The graph
-connects sentences to an article hub and includes links based on normalized
-title mentions and repeated name phrases. Prediction heads classify `yes`,
-`no`, or span answers, and score sentences as supporting facts.
+The joint reader takes the question and all titled evidence sentences. It splits
+long contexts into overlapping BERT windows so every supplied sentence can
+contribute. It predicts yes/no or an answer span, scores supporting facts, and
+restricts span decoding to its two highest-scoring evidence sentences.
 
-Start training after preparing the dataset:
+The reference model fine-tunes BERT over the context windows:
 
 ```bash
-python src/train.py
+python src/train.py --model-config configs/models/bert_reader.yaml
 ```
 
-This trains a two-layer graph attention network over sentence nodes. Its answer
-heads predict yes/no or an answer span, and its support head scores evidence
-sentences. Training uses all configured examples and saves the best joint
-answer/support checkpoint under `outputs/checkpoints/basic_gat/`. The default
-device setting selects an available TPU, GPU, or CPU; use `--device cpu`,
-`--device cuda`, or `--device xla` to choose explicitly. Training settings are
-in `configs/models/basic_gat_frozen.yaml`.
+The graph-enhanced model uses the same windows, encoder, supervision, loss, and
+evaluation, adding two graph-attention layers over sentence representations:
 
-The graph builder also supports a legacy clique graph. Train it with
-`python src/train.py --graph-mode legacy`; outputs are saved in separate
+```bash
+python src/train.py --model-config configs/models/gat_reader.yaml
+```
+
+Both configurations report answer EM/F1, supporting-fact EM/F1, and joint
+metrics. They save the best joint-F1 checkpoint, training history, and
+validation predictions to their own directories. Run on an available TPU, GPU,
+or CPU with `--device auto` (default), or select one explicitly with
+`--device xla`, `--device cuda`, or `--device cpu`. The configs use a conservative
+batch size because one question may require several 512-token windows.
+
+The graph builder supports `current` and `legacy` edge construction. Use
+`--graph-mode legacy` for the latter; its outputs are saved in separate
 `_legacy` directories. Compare graph structure and support-pair reachability
 with `python src/analyze_graphs.py --split validation`.
 
-### Transformer-only support baseline
+### Support-only baseline
 
-To compare graph message passing with global transformer attention, run the
-BERT-only support baseline:
-
-```bash
-python src/train_transformer_baseline.py
-```
-
-This model presents the question and candidate sentences as one BERT input, so
-self-attention can connect evidence across sentences and paragraphs. It predicts
-supporting facts directly and has no answer-span objective. It reports support
-EM, precision, recall, and F1, matching the GAT's evidence metrics. BERT's
-default input limit is 512 tokens; candidate sentences omitted by truncation are
-tracked in validation predictions. Settings are in
-`configs/models/transformer_support_baseline.yaml`; checkpoints and run outputs
-are saved separately under `outputs/checkpoints/transformer_support/` and
-`experiments/runs/transformer_support/`.
+`python src/train_transformer_baseline.py` runs the earlier BERT model that
+predicts supporting facts only. It is useful for evidence-selection experiments,
+but it does not provide an answer-score comparison with the joint readers.
 
 ## Kaggle
 
@@ -96,14 +88,16 @@ python -m pip install kaggle
 python scripts/push_to_kaggle.py --kernel-id YOUR_KAGGLE_USERNAME/MultihopQA
 ```
 
-To push and run the BERT-only support baseline on the default TPU, add
-`--transformer-baseline`:
+To push and run the joint GAT reader on the default TPU, select `--reader gat`:
 
 ```bash
 python scripts/push_to_kaggle.py \
   --kernel-id YOUR_KAGGLE_USERNAME/MultihopQA \
-  --transformer-baseline
+  --reader gat
 ```
+
+The default `--reader bert` runs the fine-tuned BERT reference model. Add
+`--transformer-baseline` to run the older support-only experiment.
 
 The kernel prepares HotpotQA if the processed splits are missing. Training
 artifacts are written under

@@ -1,0 +1,25 @@
+# Fine-tuned BERT extractive reader; reference point for the GAT comparison.
+model_name: bert-base-uncased
+use_graph: false
+max_sequence_length: 512
+window_stride: 128
+static_node_count: 256
+graph_hidden_size: 128
+attention_heads: 4
+dropout: 0.1
+answer_support_bias: 1.0
+support_top_k: 2
+max_answer_length: 30
+batch_size: 1
+per_device_batch_size: 1
+epochs: 3
+learning_rate: 0.00002
+weight_decay: 0.01
+warmup_ratio: 0.1
+answer_type_loss_weight: 1.0
+support_loss_weight: 1.0
+span_loss_weight: 1.0
+early_stopping_patience: 2
+seed: 42
+checkpoint_dir: outputs/checkpoints/bert_reader
+run_dir: experiments/runs/bert_reader

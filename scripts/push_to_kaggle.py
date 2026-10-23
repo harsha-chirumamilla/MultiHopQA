@@ -42,6 +42,7 @@ def make_kernel_runner(
     archive_b64,
     train_device="xla",
     training_script="src/train.py",
+    model_config="configs/models/bert_reader.yaml",
 ):
     encoded_lines = textwrap.wrap(archive_b64, width=100)
     archive_literal = "\n".join(f'    "{line}"' for line in encoded_lines)
@@ -58,6 +59,7 @@ def make_kernel_runner(
 
         TRAIN_DEVICE = "__TRAIN_DEVICE__"
         TRAINING_SCRIPT = "__TRAINING_SCRIPT__"
+        MODEL_CONFIG = "__MODEL_CONFIG__"
         PROJECT_ARCHIVE = (
             __ARCHIVE_LITERAL__
         )
@@ -123,8 +125,11 @@ def make_kernel_runner(
                 )
 
             print(f"Training project files are in {project_dir}")
+            command = [sys.executable, TRAINING_SCRIPT, "--device", TRAIN_DEVICE]
+            if TRAINING_SCRIPT == "src/train.py":
+                command.extend(["--model-config", MODEL_CONFIG])
             subprocess.run(
-                [sys.executable, TRAINING_SCRIPT, "--device", TRAIN_DEVICE],
+                command,
                 cwd=project_dir,
                 check=True,
             )
@@ -137,6 +142,7 @@ def make_kernel_runner(
     runner = textwrap.dedent(runner)
     runner = runner.replace("__ARCHIVE_LITERAL__", archive_literal)
     runner = runner.replace("__TRAINING_SCRIPT__", training_script)
+    runner = runner.replace("__MODEL_CONFIG__", model_config)
     return runner.replace("__TRAIN_DEVICE__", train_device)
 
 
@@ -152,6 +158,7 @@ def write_kernel_bundle(
     is_private,
     accelerator="tpu",
     training_script="src/train.py",
+    model_config="configs/models/bert_reader.yaml",
 ):
     if accelerator not in {"gpu", "cpu", "tpu"}:
         raise ValueError(f"Unsupported Kaggle accelerator: {accelerator}")
@@ -161,6 +168,7 @@ def write_kernel_bundle(
             make_project_archive(),
             train_device="xla" if accelerator == "tpu" else "auto",
             training_script=training_script,
+            model_config=model_config,
         ),
         encoding="utf-8",
     )
@@ -237,7 +245,13 @@ def parse_args():
     parser.add_argument(
         "--transformer-baseline",
         action="store_true",
-        help="Run the BERT-only support-fact baseline instead of the GAT model.",
+        help="Run the older support-only baseline instead of the joint QA reader.",
+    )
+    parser.add_argument(
+        "--reader",
+        choices=("bert", "gat"),
+        default="bert",
+        help="Joint QA reader to train: fine-tuned BERT baseline or graph-enhanced GAT.",
     )
     parser.add_argument(
         "--staging-dir",
@@ -245,6 +259,8 @@ def parse_args():
         help="Keep the generated upload files in this directory for inspection.",
     )
     arguments = parser.parse_args()
+    if arguments.transformer_baseline and arguments.reader != "bert":
+        parser.error("--transformer-baseline cannot be combined with --reader gat")
     if not arguments.kernel_id or arguments.kernel_id.count("/") != 1:
         parser.error("--kernel-id must be Kaggle's owner/slug, or set KAGGLE_KERNEL_ID")
     owner, slug = arguments.kernel_id.split("/", maxsplit=1)
@@ -264,6 +280,11 @@ def main():
         if arguments.transformer_baseline
         else "src/train.py"
     )
+    model_config = (
+        "configs/models/transformer_support_baseline.yaml"
+        if arguments.transformer_baseline
+        else f"configs/models/{'bert' if arguments.reader == 'bert' else 'gat'}_reader.yaml"
+    )
 
     if arguments.staging_dir:
         staging_dir = arguments.staging_dir.resolve()
@@ -274,6 +295,7 @@ def main():
             is_private=not arguments.public,
             accelerator=accelerator,
             training_script=training_script,
+            model_config=model_config,
         )
         subprocess.run(build_push_command(staging_dir, accelerator), check=True)
     else:
@@ -286,6 +308,7 @@ def main():
                 is_private=not arguments.public,
                 accelerator=accelerator,
                 training_script=training_script,
+                model_config=model_config,
             )
             subprocess.run(build_push_command(staging_dir, accelerator), check=True)
 
